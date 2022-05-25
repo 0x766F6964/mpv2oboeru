@@ -150,13 +150,12 @@ end
 -- main interface
 
 local create_snapshot = function(timestamp, filename)
-    if not helpers.is_empty(_config.image_field) then
+    if _config.create_image == true then
         local source_path = mp.get_property("path")
         local output_path = utils.join_path(_os_temp_dir(), filename)
         local args = encoder.make_snapshot_args(source_path, output_path, timestamp)
         local on_finish = function()
-            _store_fn(filename, output_path)
-            os.remove(output_path)
+            helpers.notify(string.format("File stored: '%s'.", filename))
         end
         _subprocess(args, on_finish)
     else
@@ -179,8 +178,7 @@ local create_audio = function(start_timestamp, end_timestamp, filename, padding)
             table.insert(args, #args, arg)
         end
         local on_finish = function()
-            _store_fn(filename, output_path)
-            os.remove(output_path)
+            helpers.notify(string.format("File stored: '%s'.", filename))
         end
         _subprocess(args, on_finish)
     else
@@ -188,9 +186,8 @@ local create_audio = function(start_timestamp, end_timestamp, filename, padding)
     end
 end
 
-local init = function(config, store_fn, os_temp_dir, subprocess)
+local init = function(config, os_temp_dir, subprocess)
     _config = config
-    _store_fn = store_fn
     _os_temp_dir = os_temp_dir
     _subprocess = subprocess
     encoder = config.use_ffmpeg and ffmpeg or mpv

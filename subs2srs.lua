@@ -1,5 +1,6 @@
 --[[
 Copyright (C) 2020-2022 Ren Tatsumoto and contributors
+Copyright (C) 2022 Randy Palamar
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -16,8 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Requirements:
 * mpv >= 0.32.0
-* AnkiConnect
-* curl
+* curl (for forvo)
 * xclip (when running X11)
 * wl-copy (when running Wayland)
 
@@ -56,35 +56,9 @@ local config = {
     mpv_audio_args = '--af-append=silenceremove=1:0:-50dB',
 
     -- Anki
-    create_deck = false, -- automatically create a deck for new cards
-    allow_duplicates = false, -- allow making notes with the same sentence field
-    deck_name = "Learning", -- name of the deck for new cards
-    model_name = "Japanese sentences", -- Tools -> Manage note types
     sentence_field = "SentKanji",
     audio_field = "SentAudio",
-    image_field = "Image",
-    append_media = true, -- True to append video media after existing data, false to insert media before
-    disable_gui_browse = false, -- Lets you disable anki browser manipulation by mpvacious.
-
-    -- Note tagging
-    -- The tag(s) added to new notes. Spaces separate multiple tags.
-    -- Change to "" to disable tagging completely.
-    -- The following substitutions are supported:
-    --   %n - the name of the video
-    --   %t - timestamp
-    --   %d - episode number (if none found, returns nothing)
-    --   %e - SUBS2SRS_TAGS environment variable
-    note_tag = "subs2srs %n",
-    tag_nuke_brackets = true, -- delete all text inside brackets before substituting filename into tag
-    tag_nuke_parentheses = false, -- delete all text inside parentheses before substituting filename into tag
-    tag_del_episode_num = true, -- delete the episode number if found
-    tag_del_after_episode_num = true, -- delete everything after the found episode number (does nothing if tag_del_episode_num is disabled)
-    tag_filename_lowercase = false, -- convert filename to lowercase for tagging.
-
-    -- Misc info
-    miscinfo_enable = true,
-    miscinfo_field = "Notes", -- misc notes and source information field
-    miscinfo_format = "%n EP%d (%t)", -- format string to use for the miscinfo_field, accepts note_tag-style format strings
+    create_image = true,
 
     -- Forvo support
     use_forvo = "yes", -- 'yes', 'no', 'always'
@@ -160,14 +134,6 @@ function table.get(table, key, default)
     else
         return table[key]
     end
-end
-
-local function is_running_windows()
-    return mp.get_property('options/vo-mmcss-profile') ~= nil
-end
-
-local function is_running_macOS()
-    return mp.get_property('options/cocoa-force-dedicated-gpu') ~= nil
 end
 
 local function is_running_wayland()
@@ -340,133 +306,13 @@ local function warn_formats(osd)
     end
 end
 
-local function ensure_deck()
-    if config.create_deck == true then
-        ankiconnect.create_deck(config.deck_name)
-    end
-end
-
 local function load_next_profile()
     config_manager.next_profile()
-    ensure_deck()
     helpers.notify("Loaded profile " .. profiles.active)
-end
-
-local function tag_format(filename)
-    filename = remove_extension(filename)
-    filename = remove_common_resolutions(filename)
-
-    local s, e, episode_num = helpers.get_episode_number(filename)
-
-    if config.tag_del_episode_num == true and not helpers.is_empty(s) then
-        if config.tag_del_after_episode_num == true then
-            -- Removing everything (e.g. episode name) after the episode number including itself.
-            filename = filename:sub(1, s)
-        else
-            -- Removing the first found instance of the episode number.
-            filename = filename:sub(1, s) .. filename:sub(e + 1, -1)
-        end
-    end
-
-    if config.tag_nuke_brackets == true then
-        filename = remove_text_in_brackets(filename)
-    end
-    if config.tag_nuke_parentheses == true then
-        filename = remove_filename_text_in_parentheses(filename)
-    end
-
-    if config.tag_filename_lowercase == true then
-        filename = filename:lower()
-    end
-
-    filename = remove_leading_trailing_spaces(filename)
-    filename = filename:gsub(" ", "_")
-    filename = filename:gsub("_%-_", "_") -- Replaces garbage _-_ substrings with a underscore
-    filename = remove_leading_trailing_dashes(filename)
-    return filename, episode_num or ''
-end
-
-local function substitute_fmt(tag)
-    local filename, episode = tag_format(mp.get_property("filename"))
-
-    local function substitute_filename(_tag)
-        return _tag:gsub("%%n", filename)
-    end
-
-    local function substitute_episode_number(_tag)
-        return _tag:gsub("%%d", episode)
-    end
-
-    local function substitute_time_pos(_tag)
-        local time_pos = human_readable_time(mp.get_property_number('time-pos'))
-        return _tag:gsub("%%t", time_pos)
-    end
-
-    local function substitute_envvar(_tag)
-        local env_tags = os.getenv('SUBS2SRS_TAGS') or ''
-        return _tag:gsub("%%e", env_tags)
-    end
-
-    tag = substitute_filename(tag)
-    tag = substitute_episode_number(tag)
-    tag = substitute_time_pos(tag)
-    tag = substitute_envvar(tag)
-    tag = remove_leading_trailing_spaces(tag)
-
-    return tag
-end
-
-local function construct_note_fields(sub_text, snapshot_filename, audio_filename)
-    local ret = {
-        [config.sentence_field] = sub_text,
-    }
-    if not helpers.is_empty(config.image_field) then
-        ret[config.image_field] = string.format('<img alt="snapshot" src="%s">', snapshot_filename)
-    end
-    if not helpers.is_empty(config.audio_field) then
-        ret[config.audio_field] = string.format('[sound:%s]', audio_filename)
-    end
-    if config.miscinfo_enable == true then
-        ret[config.miscinfo_field] = substitute_fmt(config.miscinfo_format)
-    end
-    return ret
 end
 
 local function minutes_ago(m)
     return (os.time() - 60 * m) * 1000
-end
-
-local function join_media_fields(new_data, stored_data)
-    for _, field in pairs { config.audio_field, config.image_field, config.miscinfo_field } do
-        if not helpers.is_empty(field) then
-            new_data[field] = table.get(stored_data, field, "") .. table.get(new_data, field, "")
-        end
-    end
-    return new_data
-end
-
-local function update_sentence(new_data, stored_data)
-    -- adds support for TSCs
-    -- https://tatsumoto-ren.github.io/blog/discussing-various-card-templates.html#targeted-sentence-cards-or-mpvacious-cards
-    -- if the target word was marked by yomichan, this function makes sure that the highlighting doesn't get erased.
-
-    if helpers.is_empty(stored_data[config.sentence_field]) then
-        -- sentence field is empty. can't continue.
-        return new_data
-    elseif helpers.is_empty(new_data[config.sentence_field]) then
-        -- *new* sentence field is empty, but old one contains data. don't delete the existing sentence.
-        new_data[config.sentence_field] = stored_data[config.sentence_field]
-        return new_data
-    end
-
-    local _, opentag, target, closetag, _ = stored_data[config.sentence_field]:match('^(.-)(<[^>]+>)(.-)(</[^>]+>)(.-)$')
-    if target then
-        local prefix, _, suffix = new_data[config.sentence_field]:match(table.concat { '^(.-)(', target, ')(.-)$' })
-        if prefix and suffix then
-            new_data[config.sentence_field] = table.concat { prefix, opentag, target, closetag, suffix }
-        end
-    end
-    return new_data
 end
 
 local function audio_padding()
@@ -637,15 +483,11 @@ end)()
 ------------------------------------------------------------
 -- front for adding and updating notes
 
-local function export_to_anki(gui)
+local function export_data()
     local sub = subs.get()
     if sub == nil then
         helpers.notify("Nothing to export.", "warn", 1)
         return
-    end
-
-    if not gui and helpers.is_empty(sub['text']) then
-        sub['text'] = string.format("mpvacious wasn't able to grab subtitles (%s)", os.time())
     end
 
     local snapshot_timestamp = mp.get_property_number("time-pos", 0)
@@ -654,62 +496,7 @@ local function export_to_anki(gui)
 
     encoder.create_snapshot(snapshot_timestamp, snapshot_filename)
     encoder.create_audio(sub['start'], sub['end'], audio_filename, audio_padding())
-
-    local note_fields = construct_note_fields(sub['text'], snapshot_filename, audio_filename)
-    ankiconnect.add_note(note_fields, gui)
-    subs.clear()
-end
-
-local function update_last_note(overwrite)
-    local sub = subs.get()
-    local last_note_id = ankiconnect.get_last_note_id()
-
-    if sub == nil then
-        helpers.notify("Nothing to export. Have you set the timings?", "warn", 2)
-        return
-    elseif helpers.is_empty(sub['text']) then
-        -- In this case, don't modify whatever existing text there is and just
-        -- modify the other fields we can. The user might be trying to add
-        -- audio to a card which they've manually transcribed (either the video
-        -- has no subtitles or it has image subtitles).
-        sub['text'] = nil
-    end
-
-    if last_note_id < minutes_ago(10) then
-        helpers.notify("Couldn't find the target note.", "warn", 2)
-        return
-    end
-
-    local snapshot_timestamp = mp.get_property_number("time-pos", 0)
-    local snapshot_filename = filename_factory.make_snapshot_filename(snapshot_timestamp)
-    local audio_filename = filename_factory.make_audio_filename(sub['start'], sub['end'])
-
-    local create_media = function()
-        encoder.create_snapshot(snapshot_timestamp, snapshot_filename)
-        encoder.create_audio(sub['start'], sub['end'], audio_filename, audio_padding())
-    end
-
-    local new_data = construct_note_fields(sub['text'], snapshot_filename, audio_filename)
-    local stored_data = ankiconnect.get_note_fields(last_note_id)
-    if stored_data then
-        new_data = append_forvo_pronunciation(new_data, stored_data)
-        new_data = update_sentence(new_data, stored_data)
-        if not overwrite then
-            if config.append_media then
-                new_data = join_media_fields(new_data, stored_data)
-            else
-                new_data = join_media_fields(stored_data, new_data)
-            end
-        end
-    end
-
-    -- If the text is still empty, put some dummy text to let the user know why
-    -- there's no text in the sentence field.
-    if helpers.is_empty(new_data[config.sentence_field]) then
-        new_data[config.sentence_field] = string.format("mpvacious wasn't able to grab subtitles (%s)", os.time())
-    end
-
-    ankiconnect.append_media(last_note_id, new_data, create_media)
+    -- FIXME: export to correct folder
     subs.clear()
 end
 
@@ -801,48 +588,9 @@ end)()
 ------------------------------------------------------------
 -- platform specific
 
-local function init_platform_windows()
-    local self = {}
-    local curl_tmpfile_path = utils.join_path(os.getenv('TEMP'), 'curl_tmp.txt')
-    mp.register_event('shutdown', function()
-        os.remove(curl_tmpfile_path)
-    end)
-
-    self.tmp_dir = function()
-        return os.getenv('TEMP')
-    end
-
-    self.copy_to_clipboard = function(text)
-        text = text:gsub("&", "^^^&"):gsub("[<>|]", "")
-        mp.commandv("run", "cmd.exe", "/d", "/c", string.format("@echo off & chcp 65001 >nul & echo %s|clip", text))
-    end
-
-    self.curl_request = function(request_json, completion_fn)
-        local handle = io.open(curl_tmpfile_path, "w")
-        handle:write(request_json)
-        handle:close()
-        local args = {
-            'curl',
-            '-s',
-            'localhost:8765',
-            '-H',
-            'Content-Type: application/json; charset=UTF-8',
-            '-X',
-            'POST',
-            '--data-binary',
-            table.concat { '@', curl_tmpfile_path }
-        }
-        return subprocess(args, completion_fn)
-    end
-
-    self.windows = true
-
-    return self
-end
-
 local function init_platform_nix()
     local self = {}
-    local clip = is_running_macOS() and 'LANG=en_US.UTF-8 pbcopy' or is_running_wayland() and 'wl-copy' or 'xclip -i -selection clipboard'
+    local clip = is_running_wayland() and 'wl-copy' or 'xclip -i -selection clipboard'
 
     self.tmp_dir = function()
         return '/tmp'
@@ -862,7 +610,7 @@ local function init_platform_nix()
     return self
 end
 
-platform = is_running_windows() and init_platform_windows() or init_platform_nix()
+platform = init_platform_nix()
 
 ------------------------------------------------------------
 -- utils for downloading pronunciations from Forvo
@@ -924,8 +672,7 @@ do
     local function reencode_and_store(source_path, filename)
         local reencoded_path = utils.join_path(platform.tmp_dir(), 'reencoded_' .. filename)
         reencode(source_path, reencoded_path)
-        local result = ankiconnect.store_file(filename, reencoded_path)
-        os.remove(reencoded_path)
+        helpers.notify(string.format("Reencoded: '%s'", reencoded_path))
         return result
     end
 
@@ -1002,218 +749,6 @@ do
 
         return new_data
     end
-end
-
-------------------------------------------------------------
--- AnkiConnect requests
-
-ankiconnect = {}
-
-ankiconnect.execute = function(request, completion_fn)
-    -- utils.format_json returns a string
-    -- On error, request_json will contain "null", not nil.
-    local request_json, error = utils.format_json(request)
-
-    if error ~= nil or request_json == "null" then
-        return completion_fn and completion_fn()
-    else
-        return platform.curl_request(request_json, completion_fn)
-    end
-end
-
-ankiconnect.parse_result = function(curl_output)
-    -- there are two values that we actually care about: result and error
-    -- but we need to crawl inside to get them.
-
-    if curl_output == nil then
-        return nil, "Failed to format json or no args passed"
-    end
-
-    if curl_output.status ~= 0 then
-        return nil, "Ankiconnect isn't running"
-    end
-
-    local stdout_json = utils.parse_json(curl_output.stdout)
-
-    if stdout_json == nil then
-        return nil, "Fatal error from Ankiconnect"
-    end
-
-    if stdout_json.error ~= nil then
-        return nil, tostring(stdout_json.error)
-    end
-
-    return stdout_json.result, nil
-end
-
-ankiconnect.store_file = function(filename, file_path)
-    local args = {
-        action = "storeMediaFile",
-        version = 6,
-        params = {
-            filename = filename,
-            path = file_path
-        }
-    }
-
-    local ret = ankiconnect.execute(args)
-    local _, error = ankiconnect.parse_result(ret)
-    if not error then
-        msg.info(string.format("File stored: '%s'.", filename))
-        return true
-    else
-        msg.error(string.format("Couldn't store file '%s': %s", filename, error))
-        return false
-    end
-end
-
-ankiconnect.create_deck = function(deck_name)
-    local args = {
-        action = "changeDeck",
-        version = 6,
-        params = {
-            cards = {},
-            deck = deck_name
-        }
-    }
-    local result_notify = function(_, result, _)
-        local _, error = ankiconnect.parse_result(result)
-        if not error then
-            msg.info(string.format("Deck %s: check completed.", deck_name))
-        else
-            msg.warn(string.format("Deck %s: check failed. Reason: %s.", deck_name, error))
-        end
-    end
-    ankiconnect.execute(args, result_notify)
-end
-
-ankiconnect.add_note = function(note_fields, gui)
-    local action = gui and 'guiAddCards' or 'addNote'
-    local tags = helpers.is_empty(config.note_tag) and {} or { substitute_fmt(config.note_tag) }
-    local args = {
-        action = action,
-        version = 6,
-        params = {
-            note = {
-                deckName = config.deck_name,
-                modelName = config.model_name,
-                fields = note_fields,
-                options = {
-                    allowDuplicate = config.allow_duplicates,
-                    duplicateScope = "deck",
-                },
-                tags = tags,
-            }
-        }
-    }
-    local result_notify = function(_, result, _)
-        local note_id, error = ankiconnect.parse_result(result)
-        if not error then
-            helpers.notify(string.format("Note added. ID = %s.", note_id))
-        else
-            helpers.notify(string.format("Error: %s.", error), "error", 2)
-        end
-    end
-    ankiconnect.execute(args, result_notify)
-end
-
-ankiconnect.get_last_note_id = function()
-    local ret = ankiconnect.execute {
-        action = "findNotes",
-        version = 6,
-        params = {
-            query = "added:1" -- find all notes added today
-        }
-    }
-
-    local note_ids, _ = ankiconnect.parse_result(ret)
-
-    if not helpers.is_empty(note_ids) then
-        return table.max_num(note_ids)
-    else
-        return -1
-    end
-end
-
-ankiconnect.get_note_fields = function(note_id)
-    local ret = ankiconnect.execute {
-        action = "notesInfo",
-        version = 6,
-        params = {
-            notes = { note_id }
-        }
-    }
-
-    local result, error = ankiconnect.parse_result(ret)
-
-    if error == nil then
-        result = result[1].fields
-        for key, value in pairs(result) do
-            result[key] = value.value
-        end
-        return result
-    else
-        return nil
-    end
-end
-
-ankiconnect.gui_browse = function(query)
-    if config.disable_gui_browse then
-        return
-    end
-    ankiconnect.execute {
-        action = 'guiBrowse',
-        version = 6,
-        params = {
-            query = query
-        }
-    }
-end
-
-ankiconnect.add_tag = function(note_id, tag)
-    if not helpers.is_empty(tag) then
-        tag = substitute_fmt(tag)
-        ankiconnect.execute {
-            action = 'addTags',
-            version = 6,
-            params = {
-                notes = { note_id },
-                tags = tag
-            }
-        }
-    end
-end
-
-ankiconnect.append_media = function(note_id, fields, create_media_fn)
-    -- AnkiConnect will fail to update the note if it's selected in the Anki Browser.
-    -- https://github.com/FooSoft/anki-connect/issues/82
-    -- Switch focus from the current note to avoid it.
-    ankiconnect.gui_browse("nid:1") -- impossible nid
-
-    local args = {
-        action = "updateNoteFields",
-        version = 6,
-        params = {
-            note = {
-                id = note_id,
-                fields = fields,
-            }
-        }
-    }
-
-    local on_finish = function(_, result, _)
-        local _, error = ankiconnect.parse_result(result)
-        if not error then
-            create_media_fn()
-            ankiconnect.add_tag(note_id, config.note_tag)
-            ankiconnect.gui_browse(string.format("nid:%s", note_id)) -- select the updated note in the card browser
-            helpers.notify(string.format("Note #%s updated.", note_id))
-        else
-            helpers.notify(string.format("Error: %s.", error), "error", 2)
-        end
-    end
-
-    ankiconnect.execute(args, on_finish)
 end
 
 ------------------------------------------------------------
@@ -1410,10 +945,8 @@ menu.keybindings = {
     { key = 'e', fn = menu:with_update { subs.set_timing, 'end' } },
     { key = 'c', fn = menu:with_update { subs.set_starting_line } },
     { key = 'r', fn = menu:with_update { subs.clear_and_notify } },
-    { key = 'g', fn = menu:with_update { export_to_anki, true } },
-    { key = 'n', fn = menu:with_update { export_to_anki, false } },
-    { key = 'm', fn = menu:with_update { update_last_note, false } },
-    { key = 'M', fn = menu:with_update { update_last_note, true } },
+    { key = 'g', fn = menu:with_update { export_data } },
+    { key = 'n', fn = menu:with_update { export_data } },
     { key = 't', fn = menu:with_update { clip_autocopy.toggle } },
     { key = 'i', fn = menu:with_update { menu.hints_state.bump } },
     { key = 'p', fn = menu:with_update { load_next_profile } },
@@ -1429,7 +962,6 @@ function menu:make_osd()
     osd:item(' to '):text(human_readable_time(subs.get_timing('end'))):newline()
     osd:item('Clipboard autocopy: '):text(clip_autocopy.is_enabled()):newline()
     osd:item('Active profile: '):text(profiles.active):newline()
-    osd:item('Deck: '):text(config.deck_name):newline()
 
     if self.hints_state.get() == 'global' then
         osd:submenu('Global bindings'):newline()
@@ -1474,21 +1006,16 @@ local main = (function()
         end
 
         config_manager.init(config, profiles)
-        encoder.init(config, ankiconnect.store_file, platform.tmp_dir, subprocess)
+        encoder.init(config, platform.tmp_dir, subprocess)
         clip_autocopy.init()
-        ensure_deck()
 
         -- Key bindings
-        mp.add_forced_key_binding("Ctrl+n", "mpvacious-export-note", export_to_anki)
+        mp.add_forced_key_binding("Ctrl+n", "mpvacious-export-note", export_data)
         mp.add_forced_key_binding("Ctrl+c", "mpvacious-copy-sub-to-clipboard", copy_sub_to_clipboard)
         mp.add_key_binding("Ctrl+t", "mpvacious-autocopy-toggle", clip_autocopy.toggle)
 
         -- Open advanced menu
         mp.add_key_binding("a", "mpvacious-menu-open", function() menu:open() end)
-
-        -- Note updating
-        mp.add_key_binding("Ctrl+m", "mpvacious-update-last-note", _ { update_last_note, false })
-        mp.add_key_binding("Ctrl+M", "mpvacious-overwrite-last-note", _ { update_last_note, true })
 
         -- Vim-like seeking between subtitle lines
         mp.add_key_binding("H", "mpvacious-sub-seek-back", _ { play_control.sub_seek, 'backward' })
