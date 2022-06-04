@@ -9,7 +9,7 @@ local config, profiles
 local function set_audio_format()
     if config.audio_format == 'opus' then
         config.audio_codec = 'libopus'
-        config.audio_extension = '.ogg'
+        config.audio_extension = '.opus'
     else
         config.audio_codec = 'libmp3lame'
         config.audio_extension = '.mp3'
